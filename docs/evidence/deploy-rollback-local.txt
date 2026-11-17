@@ -1,0 +1,24 @@
+$ ./scripts/deploy.sh 1.0.0
+2026-11-17T10:39:30Z [deploy] deploying localhost:5000/devops-task:1.0.0 (previous: none)
+
+2026-11-17T10:39:33Z [deploy] smoke test passed (attempt 2)
+2026-11-17T10:39:33Z [deploy] SUCCESS: 1.0.0 is live
+exit=0
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.0"}
+
+$ ./scripts/deploy.sh 1.0.1
+2026-11-17T10:39:34Z [deploy] deploying localhost:5000/devops-task:1.0.1 (previous: 1.0.0)
+2026-11-17T10:39:36Z [deploy] smoke test passed (attempt 2)
+2026-11-17T10:39:36Z [deploy] SUCCESS: 1.0.1 is live
+exit=0
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.1"}
+
+$ ./scripts/deploy.sh 1.0.2-broken   # image whose /health never comes up
+2026-11-17T10:39:36Z [deploy] deploying localhost:5000/devops-task:1.0.2-broken (previous: 1.0.1)
+2026-11-17T10:39:47Z [deploy] smoke test FAILED for 1.0.2-broken; last container logs:
+2026-11-17T10:40:12Z [deploy] ROLLBACK: restoring 1.0.1
+2026-11-17T10:40:14Z [deploy] smoke test passed (attempt 2)
+2026-11-17T10:40:14Z [deploy] rollback to 1.0.1 succeeded
+exit=1
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.1"}
+current_tag=1.0.1

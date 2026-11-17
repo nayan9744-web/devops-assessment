@@ -1,0 +1,29 @@
+# HPA scale-up under load (25 parallel clients hitting /metrics through the Ingress)
+$ kubectl -n devops-task get hpa devops-task --watch
+devops-task   Deployment/devops-task   cpu: 22%/70%   2     6     2     7m27s
+devops-task   Deployment/devops-task   cpu: 10%/70%   2     6     2     7m43s
+devops-task   Deployment/devops-task   cpu: 190%/70%   2     6     2     7m58s
+devops-task   Deployment/devops-task   cpu: 293%/70%   2     6     4     8m14s
+devops-task   Deployment/devops-task   cpu: 193%/70%   2     6     4     8m30s
+devops-task   Deployment/devops-task   cpu: 120%/70%   2     6     6     8m46s
+devops-task   Deployment/devops-task   cpu: 120%/70%   2     6     6     9m2s
+devops-task   Deployment/devops-task   cpu: 118%/70%   2     6     6     9m18s
+devops-task   Deployment/devops-task   cpu: 120%/70%   2     6     6     9m33s
+
+$ kubectl -n devops-task top pods
+NAME                           CPU(cores)   MEMORY(bytes)   
+devops-task-7cb9dd6459-7kmf9   53m          39Mi            
+devops-task-7cb9dd6459-dc8dq   56m          39Mi            
+devops-task-7cb9dd6459-fb8lm   59m          39Mi            
+devops-task-7cb9dd6459-lp49m   61m          39Mi            
+devops-task-7cb9dd6459-mdvzw   54m          39Mi            
+devops-task-7cb9dd6459-wfrtz   54m          39Mi            
+
+$ kubectl -n devops-task get pods
+NAME                           READY   STATUS    RESTARTS   AGE
+devops-task-7cb9dd6459-7kmf9   1/1     Running   0          94s
+devops-task-7cb9dd6459-dc8dq   1/1     Running   0          2m4s
+devops-task-7cb9dd6459-fb8lm   1/1     Running   0          2m59s
+devops-task-7cb9dd6459-lp49m   1/1     Running   0          3m10s
+devops-task-7cb9dd6459-mdvzw   1/1     Running   0          94s
+devops-task-7cb9dd6459-wfrtz   1/1     Running   0          2m4s
