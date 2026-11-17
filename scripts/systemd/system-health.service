@@ -1,6 +1,6 @@
 [Unit]
 Description=System health check (CPU, memory, disk, load)
-Documentation=https://github.com/nayan9744/devops-assessment
+Documentation=https://github.com/nayan9744-web/devops-assessment
 After=network-online.target
 
 [Service]

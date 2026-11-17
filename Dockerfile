@@ -27,7 +27,7 @@ LABEL org.opencontainers.image.title="devops-task" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${GIT_SHA}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.source="https://github.com/nayan9744/devops-assessment" \
+      org.opencontainers.image.source="https://github.com/nayan9744-web/devops-assessment" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONPATH=/deps \

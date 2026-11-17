@@ -29,7 +29,7 @@ A small FastAPI service, delivered end to end: container image, CI/CD, Terraform
 ## Quick start (app + monitoring)
 
 ```bash
-git clone https://github.com/nayan9744/devops-assessment.git && cd devops-assessment
+git clone https://github.com/nayan9744-web/devops-assessment.git && cd devops-assessment
 cp .env.example .env            # set GRAFANA_ADMIN_PASSWORD; .env is git-ignored
 
 # App only
@@ -142,7 +142,7 @@ flowchart LR
 | **Distroless over alpine** | No shell or package manager means fewer CVEs and a smaller attack surface. glibc keeps prebuilt wheels working. The trade-off is that you can't `docker exec sh`; use `kubectl debug` or an ephemeral debug container instead. |
 | **Single EC2 + Docker instead of ECS/EKS for the AWS part** | Matches the assessment scope and keeps cost at roughly $15–30/month. ECS Fargate would be the next step. EKS only makes sense with many services (see "EKS production notes"). |
 | **SSM Run Command instead of SSH** | No port 22 open, no SSH keys to rotate in GitHub, and every deploy command is audited in CloudTrail and SSM history. |
-| **GitHub OIDC → IAM role** | No long-lived AWS keys in GitHub. The role trust is restricted to `repo:nayan9744/devops-assessment` on `main` and the `staging`/`production` environments. |
+| **GitHub OIDC → IAM role** | No long-lived AWS keys in GitHub. The role trust is restricted to `repo:nayan9744-web/devops-assessment` on `main` and the `staging`/`production` environments. |
 | **Tagging: `MAJOR.MINOR.<run_number>` + `sha-<7>`, no `latest`** | The ECR repo uses **immutable tags**, so a tag always means the same bytes. The SHA tag links an image to its commit, and the semver tag is easy for people to read and roll back to. `latest` is ambiguous and is never deployed. |
 | **S3 remote state with `use_lockfile = true`** | Terraform 1.10+ supports S3-native locking, so no DynamoDB table is needed. The bucket is versioned, encrypted, private and TLS-only. The bucket/ECR/OIDC role live in a separate `bootstrap` stack, which avoids a chicken-and-egg problem. |
 | **One environment module + `envs/*.tfvars` / `*.s3.tfbackend`** | Staging and production use the same code with different sizes and retention, and separate state files. That's simpler than workspaces and harder to confuse. |

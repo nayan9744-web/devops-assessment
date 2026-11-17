@@ -13,7 +13,7 @@ variable "project" {
 variable "github_repository" {
   description = "GitHub repository allowed to assume the CI role, in owner/name form."
   type        = string
-  default     = "nayan9744/devops-assessment"
+  default     = "nayan9744-web/devops-assessment"
 }
 
 variable "create_github_oidc_provider" {
