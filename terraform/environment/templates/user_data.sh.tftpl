@@ -1,0 +1,26 @@
+#!/bin/bash
+# Bootstrap: install Docker, write deploy configuration, start the application container.
+set -euo pipefail
+exec > >(tee -a /var/log/user-data.log) 2>&1
+
+dnf install -y docker
+systemctl enable --now docker
+
+install -d -m 0755 /opt/devops-task /etc/devops-task
+
+cat > /etc/devops-task/app.env <<CFG
+AWS_REGION=${aws_region}
+ECR_REGISTRY=${ecr_registry}
+ECR_REPOSITORY=${ecr_repository}
+APP_ENV=${environment}
+LOG_LEVEL=${log_level}
+LOG_GROUP=${log_group}
+HTTP_PORT=${http_port}
+CFG
+chmod 0644 /etc/devops-task/app.env
+
+echo '${deploy_script_b64}' | base64 -d > /opt/devops-task/deploy.sh
+chmod 0755 /opt/devops-task/deploy.sh
+
+# First deployment. If the image does not exist yet, CI will deploy it later via SSM.
+/opt/devops-task/deploy.sh "${image_tag}" || echo "initial deploy of ${image_tag} failed; waiting for CI"

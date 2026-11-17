@@ -1,0 +1,6 @@
+# Replace <ACCOUNT_ID> with the value from the bootstrap output "state_bucket".
+bucket       = "devops-task-tfstate-<ACCOUNT_ID>"
+key          = "devops-task/production/terraform.tfstate"
+region       = "ap-southeast-1"
+encrypt      = true
+use_lockfile = true # S3-native state locking (Terraform >= 1.10), no DynamoDB table needed
