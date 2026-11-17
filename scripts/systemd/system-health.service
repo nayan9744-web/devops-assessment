@@ -1,0 +1,21 @@
+[Unit]
+Description=System health check (CPU, memory, disk, load)
+Documentation=https://github.com/nayan9744/devops-assessment
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/system_health.sh --quiet --log-file /var/log/system_health/health_log.txt
+# Exit 1/2 mean warning/critical, not a broken unit - don't mark the unit as failed for them.
+SuccessExitStatus=1 2
+EnvironmentFile=-/etc/default/system-health
+DynamicUser=yes
+LogsDirectory=system_health
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+NoNewPrivileges=yes
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
