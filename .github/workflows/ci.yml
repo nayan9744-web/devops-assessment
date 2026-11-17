@@ -1,0 +1,171 @@
+# Pull-request quality and security gates.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_call: # reused by the CD workflow so main is always re-validated before release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: devops-task
+
+jobs:
+  lint-test:
+    name: Lint, test & coverage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write # coverage comment
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: Unit tests with coverage (fails under 80%)
+        run: pytest --junitxml=pytest-report.xml
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          rate = float(ET.parse("coverage.xml").getroot().get("line-rate")) * 100
+          print(f"### Test coverage: {rate:.1f}%")
+          PY
+
+      - name: Coverage comment on PR
+        if: github.event_name == 'pull_request'
+        uses: py-cov-action/python-coverage-comment-action@v3
+        with:
+          GITHUB_TOKEN: ${{ github.token }}
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 80
+        continue-on-error: true # comment is informational; the 80% gate is enforced by pytest
+
+      - name: Upload test & coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            coverage.xml
+            pytest-report.xml
+
+  static-analysis:
+    name: Dockerfile, shell & IaC lint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: ShellCheck
+        run: |
+          sudo apt-get install -y --no-install-recommends shellcheck >/dev/null
+          shellcheck --version
+          shellcheck -x scripts/*.sh
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+
+      - name: Terraform fmt & validate
+        run: |
+          terraform -chdir=terraform fmt -check -recursive
+          for d in bootstrap environment; do
+            terraform -chdir=terraform/$d init -backend=false -input=false
+            terraform -chdir=terraform/$d validate
+          done
+
+      - name: Kubernetes manifests (kustomize build + kubeconform)
+        run: |
+          cp k8s/secret.env.example k8s/secret.env
+          kubectl kustomize k8s > /tmp/manifests.yaml
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary -kubernetes-version 1.33.0 /tmp/manifests.yaml
+
+  image-scan:
+    name: Build & vulnerability scan
+    runs-on: ubuntu-24.04
+    needs: [lint-test, static-analysis]
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to the Security tab
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (single arch, loaded locally for scanning)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          build-args: |
+            APP_VERSION=ci-${{ github.sha }}
+            GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test container
+        run: |
+          docker run -d --name smoke -p 8080:8080 ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          for _ in $(seq 1 20); do curl -fsS localhost:8080/health && break; sleep 1; done
+          curl -fsS localhost:8080/ | grep -q "Hello from DevOps Task!"
+          docker inspect --format '{{.Config.User}}' smoke | grep -q '65532'   # non-root
+          docker image ls ${{ env.IMAGE_NAME }}:ci-${{ github.sha }} --format 'Image size: {{.Size}}' >> "$GITHUB_STEP_SUMMARY"
+          docker rm -f smoke
+
+      - name: Trivy scan (fail on CRITICAL)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Trivy report (HIGH+CRITICAL, SARIF, informational)
+        if: always()
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:ci-${{ github.sha }}
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          skip-setup-trivy: true
+
+      - name: Upload SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+        continue-on-error: true # requires GitHub Advanced Security on private repos
