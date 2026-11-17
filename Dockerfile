@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 # ---------- Stage 1: build dependencies ----------
 # Python minor version matches the distroless runtime (3.11, Debian 12) so compiled wheels are ABI-compatible.
-FROM python:3.11-slim-bookworm@sha256:a83ba18aef0f865b1a4a611c2cf460fe446f2795673bbb9fe43be570439e3b39 AS builder
+FROM python:3.15-slim-bookworm@sha256:96599df822d0e1c6bb700014a05c7f3c8cabc6e0f7ff3c4f9f69cee033b4b5d9 AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
