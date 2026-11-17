@@ -51,6 +51,8 @@ jobs:
     name: Build multi-arch & push to ECR
     runs-on: ubuntu-24.04
     needs: [ci, version]
+    # Skip (instead of failing) until AWS is bootstrapped and the repo variables are set.
+    if: vars.AWS_ROLE_ARN != ''
     permissions:
       contents: read
       id-token: write # GitHub OIDC -> AWS STS (no static keys)
@@ -116,6 +118,7 @@ jobs:
     name: Deploy to ${{ inputs.environment || 'staging' }} (EC2 via SSM)
     runs-on: ubuntu-24.04
     needs: [version, build-push]
+    if: vars.AWS_ROLE_ARN != ''
     environment:
       name: ${{ inputs.environment || 'staging' }} # production can require manual approval
       url: ${{ steps.deploy.outputs.url }}
