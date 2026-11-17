@@ -1,0 +1,93 @@
+// Grafana Alloy: discover all Docker containers and ship their logs to Loki.
+
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+// Turn Docker metadata into a small, bounded set of labels.
+discovery.relabel "containers" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  targets          = discovery.docker.containers.targets
+  relabel_rules    = discovery.relabel.containers.rules
+  forward_to       = [loki.process.containers.receiver]
+  refresh_interval = "10s"
+}
+
+loki.process "containers" {
+  // JSON pipeline for services that emit structured logs (our app).
+  stage.match {
+    selector = "{service=\"app\"}"
+
+    stage.json {
+      expressions = {
+        level       = "level",
+        path        = "path",
+        status      = "status",
+        method      = "method",
+        duration_ms = "duration_ms",
+        ts          = "timestamp",
+      }
+    }
+
+    // Use the application's own timestamp instead of the time Alloy read the line.
+    stage.timestamp {
+      source = "ts"
+      format = "RFC3339Nano"
+    }
+
+    // LOW-cardinality fields become index labels (a handful of values each).
+    stage.labels {
+      values = { level = "" }
+    }
+
+    // Higher-cardinality fields are attached as structured metadata: filterable in Grafana
+    // (e.g. {service="app"} | path="/error") without creating new streams.
+    stage.structured_metadata {
+      values = { path = "", status = "", method = "" }
+    }
+  }
+
+  // Best-effort level detection for non-JSON containers (Grafana, Loki, ...).
+  stage.match {
+    selector = "{service!=\"app\"}"
+    stage.regex {
+      expression = "(?i)(level|lvl)=\"?(?P<level>debug|info|warn|warning|error|fatal)\"?"
+    }
+    // Normalise to a fixed lowercase set (debug|info|warn|error|fatal) to keep cardinality tiny.
+    stage.template {
+      source   = "level"
+      template = "{{ if .Value }}{{ ToLower .Value | replace \"warning\" \"warn\" }}{{ end }}"
+    }
+    stage.labels {
+      values = { level = "" }
+    }
+  }
+
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+  external_labels = { environment = "local" }
+}
