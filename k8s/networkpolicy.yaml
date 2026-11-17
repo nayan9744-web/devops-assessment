@@ -1,0 +1,20 @@
+# Only the ingress controller (and Prometheus, if deployed in-cluster) may reach the pods.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: devops-task
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: devops-task
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080

@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: devops-task
+spec:
+  minAvailable: 1   # node drains can never take the service fully down
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: devops-task
