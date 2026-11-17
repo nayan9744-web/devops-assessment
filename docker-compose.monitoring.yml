@@ -1,0 +1,186 @@
+# Observability stack. Run together with the app:
+#   docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up -d
+# Only Grafana publishes a port to the host; everything else talks over internal networks.
+name: devops-task
+
+x-common: &common
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  prometheus:
+    <<: *common
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d   # explicit retention (time)
+      - --storage.tsdb.retention.size=2GB   # ...and a size cap so a small disk never fills up
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    networks: [monitoring, app]   # needs the app network to scrape app:8080/metrics
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  alertmanager:
+    <<: *common
+    image: prom/alertmanager:v0.28.1
+    container_name: alertmanager
+    # Alertmanager cannot expand env vars in its config, so the webhook URL is written to a file
+    # at start-up from an environment variable (never committed to git).
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        printf '%s' "$${SLACK_WEBHOOK_URL:-http://127.0.0.1:1/disabled}" > /tmp/slack_webhook_url
+        exec /bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml --storage.path=/alertmanager
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+    volumes:
+      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks: [monitoring, egress]   # egress needed to reach Slack
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+
+  loki:
+    <<: *common
+    image: grafana/loki:3.5.3
+    container_name: loki
+    command: ["-config.file=/etc/loki/loki-config.yml"]
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  alloy:
+    <<: *common
+    image: grafana/alloy:v1.10.1
+    container_name: alloy
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./monitoring/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only Docker socket: used for container discovery and reading container logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy-data:/var/lib/alloy/data
+    networks: [monitoring]
+    depends_on:
+      loki:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  node-exporter:
+    <<: *common
+    image: prom/node-exporter:v1.9.1
+    container_name: node-exporter
+    command:
+      - --path.rootfs=/host
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|run|var/lib/docker/.+)($$|/)
+    pid: host               # see host processes for process/load metrics
+    volumes:
+      - /:/host:ro,rslave   # read-only view of the host filesystem for disk usage
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M }
+
+  cadvisor:
+    <<: *common
+    image: ghcr.io/google/cadvisor:0.54.1
+    container_name: cadvisor
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=15s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.service
+      - --disable_metrics=percpu,sched,tcp,udp,disk,diskIO,hugetlb,referenced_memory,cpu_topology,resctrl
+    privileged: true        # required to read cgroup stats for all containers
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+
+  grafana:
+    <<: *common
+    image: grafana/grafana:12.1.1
+    container_name: grafana
+    ports:
+      # The ONLY port of the monitoring stack published to the host. Bound to localhost by default.
+      - "${GRAFANA_BIND:-127.0.0.1}:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set GRAFANA_ADMIN_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/application.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks: [monitoring, frontend]
+    depends_on: [prometheus, loki]
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  monitoring:
+    name: devops-task-monitoring
+    internal: true          # no external connectivity, no published ports
+  frontend:
+    name: devops-task-frontend
+  egress:
+    name: devops-task-egress
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  loki-data:
+  alloy-data:
+  grafana-data:
