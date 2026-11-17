@@ -1,0 +1,193 @@
+# Release pipeline: build multi-arch image -> push to ECR -> deploy to EC2 via SSM with
+# smoke test and automatic rollback.
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, production]
+        default: staging
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false # never cancel a deployment half-way
+
+jobs:
+  ci:
+    name: Re-run CI gates
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      pull-requests: write
+      security-events: write
+
+  version:
+    name: Compute version
+    runs-on: ubuntu-24.04
+    outputs:
+      semver: ${{ steps.v.outputs.semver }}
+      sha: ${{ steps.v.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Semantic version from VERSION file + run number
+        run: |
+          base="$(tr -d '[:space:]' < VERSION)"
+          [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must be MAJOR.MINOR.PATCH"; exit 1; }
+          # e.g. 1.0.0 -> 1.0.<run_number>: unique, monotonically increasing, SemVer-compliant
+          IFS=. read -r major minor _ <<< "$base"
+          echo "semver=${major}.${minor}.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+  build-push:
+    name: Build multi-arch & push to ECR
+    runs-on: ubuntu-24.04
+    needs: [ci, version]
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC -> AWS STS (no static keys)
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - id: meta
+        run: echo "image=${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & push (linux/amd64 + linux/arm64)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true # bonus: SBOM attestation attached to the image
+          # Immutable tags only: semver + git sha. No `latest`.
+          tags: |
+            ${{ steps.meta.outputs.image }}:${{ needs.version.outputs.semver }}
+            ${{ steps.meta.outputs.image }}:sha-${{ needs.version.outputs.sha }}
+          build-args: |
+            APP_VERSION=${{ needs.version.outputs.semver }}
+            GIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sign image with Cosign (keyless, bonus)
+        uses: sigstore/cosign-installer@v3
+      - run: cosign sign --yes "${{ steps.meta.outputs.image }}@${{ steps.build.outputs.digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        continue-on-error: true # ECR supports OCI signatures; don't block deploys on Sigstore outages
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image pushed"
+            echo "- \`${{ steps.meta.outputs.image }}:${{ needs.version.outputs.semver }}\`"
+            echo "- \`${{ steps.meta.outputs.image }}:sha-${{ needs.version.outputs.sha }}\`"
+            echo "- digest \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy to ${{ inputs.environment || 'staging' }} (EC2 via SSM)
+    runs-on: ubuntu-24.04
+    needs: [version, build-push]
+    environment:
+      name: ${{ inputs.environment || 'staging' }} # production can require manual approval
+      url: ${{ steps.deploy.outputs.url }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TARGET_ENV: ${{ inputs.environment || 'staging' }}
+      TAG: ${{ needs.version.outputs.semver }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Find target instance
+        id: target
+        run: |
+          id=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=devops-task" "Name=tag:Environment,Values=${TARGET_ENV}" \
+                      "Name=instance-state-name,Values=running" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text)
+          [[ "$id" == i-* ]] || { echo "::error::no running instance for ${TARGET_ENV}"; exit 1; }
+          dns=$(aws ec2 describe-instances --instance-ids "$id" --query 'Reservations[0].Instances[0].PublicDnsName' --output text)
+          echo "id=$id" >> "$GITHUB_OUTPUT"; echo "dns=$dns" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy with smoke test & automatic rollback (runs scripts/deploy.sh on the host)
+        id: deploy
+        run: |
+          cmd_id=$(aws ssm send-command \
+            --instance-ids "${{ steps.target.outputs.id }}" \
+            --document-name AWS-RunShellScript \
+            --comment "deploy ${TAG} (${GITHUB_SHA::7})" \
+            --timeout-seconds 600 \
+            --parameters "commands=[\"/opt/devops-task/deploy.sh ${TAG}\"]" \
+            --query 'Command.CommandId' --output text)
+          echo "SSM command: $cmd_id"
+          # `wait` exits non-zero if the command failed (deploy.sh exits 1 after rolling back).
+          aws ssm wait command-executed --command-id "$cmd_id" --instance-id "${{ steps.target.outputs.id }}" || true
+          out=$(aws ssm get-command-invocation --command-id "$cmd_id" --instance-id "${{ steps.target.outputs.id }}")
+          echo "$out" | jq -r '.StandardOutputContent, .StandardErrorContent'
+          status=$(echo "$out" | jq -r '.Status')
+          echo "url=http://${{ steps.target.outputs.dns }}" >> "$GITHUB_OUTPUT"
+          if [[ "$status" != "Success" ]]; then
+            echo "::error::Deployment of ${TAG} failed (status=${status}); the host rolled back to the previous tag."
+            exit 1
+          fi
+
+      - name: External smoke test
+        run: |
+          for _ in $(seq 1 10); do
+            if curl -fsS -m 5 "${{ steps.deploy.outputs.url }}/health"; then
+              curl -fsS "${{ steps.deploy.outputs.url }}/" | jq -e --arg v "$TAG" '.version == $v'
+              echo "### Deployed ${TAG} to ${TARGET_ENV}: ${{ steps.deploy.outputs.url }}" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::external health check failed"; exit 1
+
+      - name: Roll back if the external smoke test failed
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          # shellcheck disable=SC2016  # $prev must expand on the instance, not on the runner
+          cmd_id=$(aws ssm send-command \
+            --instance-ids "${{ steps.target.outputs.id }}" \
+            --document-name AWS-RunShellScript \
+            --comment "rollback after failed external smoke test of ${TAG}" \
+            --parameters 'commands=["prev=$(cat /opt/devops-task/previous_tag); [ -n \"$prev\" ] && /opt/devops-task/deploy.sh \"$prev\""]' \
+            --query 'Command.CommandId' --output text)
+          aws ssm wait command-executed --command-id "$cmd_id" --instance-id "${{ steps.target.outputs.id }}" || true
+          aws ssm get-command-invocation --command-id "$cmd_id" --instance-id "${{ steps.target.outputs.id }}" \
+            | jq -r '.Status, .StandardOutputContent'
+          echo "::error::Rolled back to the previous image after a failed external smoke test."
