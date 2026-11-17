@@ -1,0 +1,78 @@
+# Zero-downtime rolling update + rollback on kind (a traffic generator hits the Ingress every 50ms in the background)
+
+$ kubectl -n devops-task get deploy devops-task -o wide | cut -c1-100
+NAME          READY   UP-TO-DATE   AVAILABLE   AGE   CONTAINERS   IMAGES              SELECTOR
+devops-task   2/2     2            2           19s   app          devops-task:1.0.0   app.kubernetes
+
+$ kubectl -n devops-task rollout history deployment/devops-task
+deployment.apps/devops-task 
+REVISION  CHANGE-CAUSE
+1         initial deploy devops-task:1.0.0
+
+
+$ kubectl -n devops-task set image deployment/devops-task app=devops-task:1.0.1
+deployment.apps/devops-task image updated
+
+$ kubectl -n devops-task annotate deployment/devops-task kubernetes.io/change-cause="set image devops-task:1.0.1" --overwrite
+deployment.apps/devops-task annotated
+
+$ kubectl -n devops-task rollout status deployment/devops-task --timeout=120s
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+deployment "devops-task" successfully rolled out
+
+$ kubectl -n devops-task get rs -o wide | cut -c1-100
+NAME                     DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES              SELECTOR
+devops-task-747d58d898   2         2         2       30s   app          devops-task:1.0.1   app.kube
+devops-task-7cb9dd6459   0         0         0       49s   app          devops-task:1.0.0   app.kube
+
+$ curl -s -H 'Host: devops-task.localtest.me' http://localhost:8088/
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.1"}
+$ kubectl -n devops-task rollout history deployment/devops-task
+deployment.apps/devops-task 
+REVISION  CHANGE-CAUSE
+1         initial deploy devops-task:1.0.0
+2         set image devops-task:1.0.1
+
+
+# ---------------- rollback ----------------
+
+$ kubectl -n devops-task rollout undo deployment/devops-task
+deployment.apps/devops-task rolled back
+
+$ kubectl -n devops-task rollout status deployment/devops-task --timeout=120s
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 1 out of 2 new replicas have been updated...
+Waiting for deployment "devops-task" rollout to finish: 2 old replicas are pending termination...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "devops-task" rollout to finish: 1 old replicas are pending termination...
+deployment "devops-task" successfully rolled out
+
+$ kubectl -n devops-task get rs -o wide | cut -c1-100
+NAME                     DESIRED   CURRENT   READY   AGE   CONTAINERS   IMAGES              SELECTOR
+devops-task-747d58d898   0         0         0       60s   app          devops-task:1.0.1   app.kube
+devops-task-7cb9dd6459   2         2         2       79s   app          devops-task:1.0.0   app.kube
+
+$ curl -s -H 'Host: devops-task.localtest.me' http://localhost:8088/
+{"message":"Hello from DevOps Task!","status":"running","version":"1.0.0"}
+$ kubectl -n devops-task rollout history deployment/devops-task
+deployment.apps/devops-task 
+REVISION  CHANGE-CAUSE
+2         set image devops-task:1.0.1
+3         initial deploy devops-task:1.0.0
+
+
+# ---------------- traffic during both rollouts ----------------
+total requests: 916
+by HTTP status:
+    916   200
+by version served:
+    473 "version":"1.0.0"
+    443 "version":"1.0.1"

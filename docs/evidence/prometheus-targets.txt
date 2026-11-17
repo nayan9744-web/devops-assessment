@@ -1,0 +1,8 @@
+app http://app:8080/metrics up
+cadvisor http://cadvisor:8080/metrics up
+monitoring-stack http://loki:3100/metrics up
+monitoring-stack http://alloy:12345/metrics up
+monitoring-stack http://grafana:3000/metrics up
+monitoring-stack http://alertmanager:9093/metrics up
+node-exporter http://node-exporter:9100/metrics up
+prometheus http://localhost:9090/metrics up
